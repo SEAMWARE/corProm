@@ -12,7 +12,7 @@
 
 #include <stdint.h>                              // int64_t
 
-#include "kalloc/KAlloc.h"                          // KAlloc
+#include "corAlloc/CorAlloc.h"                      // CorAlloc
 #include "corTree/CorNode.h"                        // CorNode
 
 //
@@ -134,8 +134,8 @@ extern CorPromMetric* corPromLookup(const char* name);
 // corPromMetrics - render all metrics as a CorNode tree
 //
 // Returns an array of metric objects for a caller's /metrics endpoint.
-// Pass NULL to use malloc, or the KAlloc to build the tree in.
+// Pass NULL to use malloc, or the CorAlloc to build the tree in.
 //
-extern CorNode* corPromMetrics(KAlloc* kaP);
+extern CorNode* corPromMetrics(CorAlloc* kaP);
 
 #endif  // CORPROM_H_

@@ -13,7 +13,7 @@
 #include <stdatomic.h>                           // atomic operations
 #include <math.h>                                // INFINITY
 
-#include "kalloc/KAlloc.h"                          // KAlloc
+#include "corAlloc/CorAlloc.h"                      // CorAlloc
 #include "corTree/CorNode.h"                        // CorNode
 #include "corTree/corTreeBuilder.h"                  // corTreeArray, corTreeObject, corTreeString, corTreeFloat, corTreeInteger
 
@@ -445,7 +445,7 @@ CorPromMetric* corPromLookup(const char* name)
 //
 // corPromMetrics - render all metrics as a CorNode tree
 //
-CorNode* corPromMetrics(KAlloc* kaP)
+CorNode* corPromMetrics(CorAlloc* kaP)
 {
   CorNode* metricsArray = corTreeArray(kaP, NULL);
 
