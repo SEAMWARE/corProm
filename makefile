@@ -34,7 +34,26 @@ OBJDIR        = obj/$(BUILD)
 OBJECTS       = $(LIB_SOURCES:%.c=$(OBJDIR)/%.o)
 DEPS          = $(OBJECTS:.o=.d)
 
-all: $(LIB) $(LIB_SO)
+#
+# The archive and the shared library are built PER FLAVOUR, in $(OBJDIR), and then STAGED to the repo
+# root, where every consumer links them (../corProm/libcorProm.a). Unconditionally, on every build:
+# built in place, a debug archive is newer than obj/release/*.o, so `make BUILD=release` after a debug
+# build found nothing to do and left the other flavour's archive in place. A plain cp, not cp -p:
+# the staged file gets a new mtime, so whatever links it relinks. Copied and renamed, so a process
+# that has the .so mapped keeps the old file.
+#
+all: $(OBJDIR)/$(LIB) $(OBJDIR)/$(LIB_SO)
+	@cp -f $(OBJDIR)/$(LIB) $(LIB).tmp && mv -f $(LIB).tmp $(LIB)
+	@cp -f $(OBJDIR)/$(LIB_SO) $(LIB_SO).tmp && mv -f $(LIB_SO).tmp $(LIB_SO)
+
+#
+# The staged files by name - `make libcorProm.a` stages the current flavour's archive.
+#
+$(LIB): $(OBJDIR)/$(LIB)
+	@cp -f $< $@.tmp && mv -f $@.tmp $@
+
+$(LIB_SO): $(OBJDIR)/$(LIB_SO)
+	@cp -f $< $@.tmp && mv -f $@.tmp $@
 
 #
 # $(OBJDIR)/.flags - rebuild when the COMPILE LINE changes
@@ -42,11 +61,12 @@ all: $(LIB) $(LIB_SO)
 # A flag change is invisible to every timestamp: the sources are older than the
 # objects and make sees nothing to do, so the build silently keeps objects
 # compiled with the previous flags. This records them and makes the objects
-# depend on the record.
+# depend on the record. The compiler is part of the line: `make pgo` passes
+# CC="gcc -fprofile-use=...".
 #
 $(OBJDIR)/.flags: FORCE
 	@mkdir -p $(OBJDIR)
-	@echo '$(CFLAGS)' | cmp -s - $@ || echo '$(CFLAGS)' > $@
+	@echo '$(CC) $(CFLAGS)' | cmp -s - $@ || echo '$(CC) $(CFLAGS)' > $@
 
 $(OBJDIR)/%.o: %.c $(OBJDIR)/.flags
 	@mkdir -p $(OBJDIR)
@@ -57,11 +77,11 @@ $(OBJDIR)/%.o: %.c $(OBJDIR)/.flags
 # is no longer built stays in the archive forever, and the next link quietly
 # uses code that is not in the tree any more.
 #
-$(LIB): $(OBJECTS)
+$(OBJDIR)/$(LIB): $(OBJECTS)
 	@rm -f $@
 	ar rcs $@ $(OBJECTS)
 
-$(LIB_SO): $(OBJECTS)
+$(OBJDIR)/$(LIB_SO): $(OBJECTS)
 	$(CC) -shared -o $@ $(OBJECTS)
 
 #
@@ -76,7 +96,7 @@ di: all install
 ci: clean install
 
 clean:
-	rm -rf obj $(LIB) $(LIB_SO) *.o *.d *.gcno *.gcda
+	rm -rf obj $(LIB) $(LIB_SO) $(LIB).tmp $(LIB_SO).tmp *.o *.d *.gcno *.gcda
 
 FORCE:
 
