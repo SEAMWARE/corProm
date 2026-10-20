@@ -11,7 +11,7 @@
 #include <stdlib.h>                              // malloc, free
 #include <string.h>                              // strdup, strcmp
 #include <stdatomic.h>                           // atomic operations
-#include <math.h>                                // INFINITY
+#include <math.h>                                // INFINITY, llround
 
 #include "corAlloc/CorAlloc.h"                      // CorAlloc
 #include "corTree/CorNode.h"                        // CorNode
@@ -43,7 +43,7 @@ typedef struct CorPromHistogram
   double*                bucketBounds;  // Array of bucket upper bounds (last is +Inf)
   atomic_int_fast64_t*   bucketCounts;  // Array of bucket counts
   int                    bucketCount;   // Number of buckets
-  atomic_int_fast64_t    sum;           // Sum of all observed values (fixed-point)
+  atomic_int_fast64_t    sum;           // Sum of all observed values, in billionths (fixed-point: 1 = 1e-9)
   atomic_int_fast64_t    count;         // Count of observations
 } CorPromHistogram;
 
@@ -270,7 +270,7 @@ void corPromHistogramObserve(CorPromMetric* histogram, double value)
   }
 
   // Update sum and count
-  atomic_fetch_add(&h->sum, (int64_t)(value * 1000.0));
+  atomic_fetch_add(&h->sum, (int64_t) llround(value * 1e9));   // a request of 0.2 ms is 200000, not 0
   atomic_fetch_add(&h->count, 1);
 }
 
@@ -318,14 +318,14 @@ int corPromRenderSize(void)
         if (h->bucketBounds[i] == INFINITY)
           size += snprintf(NULL, 0, "%s_bucket{le=\"+Inf\"} %ld\n", m->name, count);
         else
-          size += snprintf(NULL, 0, "%s_bucket{le=\"%.3f\"} %ld\n", m->name, h->bucketBounds[i], count);
+          size += snprintf(NULL, 0, "%s_bucket{le=\"%g\"} %ld\n", m->name, h->bucketBounds[i], count);
       }
 
       // Sum and count
       int64_t sum   = atomic_load(&h->sum);
       int64_t count = atomic_load(&h->count);
 
-      size += snprintf(NULL, 0, "%s_sum %.3f\n", m->name, sum / 1000.0);
+      size += snprintf(NULL, 0, "%s_sum %.9f\n", m->name, sum / 1e9);
       size += snprintf(NULL, 0, "%s_count %ld\n", m->name, count);
     }
   }
@@ -396,7 +396,7 @@ int corPromRender(char* buf, int bufLen)
         if (h->bucketBounds[i] == INFINITY)
           n = snprintf(buf + written, remaining, "%s_bucket{le=\"+Inf\"} %ld\n", m->name, count);
         else
-          n = snprintf(buf + written, remaining, "%s_bucket{le=\"%.3f\"} %ld\n", m->name, h->bucketBounds[i], count);
+          n = snprintf(buf + written, remaining, "%s_bucket{le=\"%g\"} %ld\n", m->name, h->bucketBounds[i], count);
 
         if (n >= remaining) return written + n;
         written += n;
@@ -407,7 +407,7 @@ int corPromRender(char* buf, int bufLen)
       int64_t sum   = atomic_load(&h->sum);
       int64_t count = atomic_load(&h->count);
 
-      n = snprintf(buf + written, remaining, "%s_sum %.3f\n", m->name, sum / 1000.0);
+      n = snprintf(buf + written, remaining, "%s_sum %.9f\n", m->name, sum / 1e9);
       if (n >= remaining) return written + n;
       written += n;
       remaining -= n;
@@ -493,7 +493,7 @@ CorNode* corPromMetrics(CorAlloc* kaP)
       // Sum and count
       int64_t sum   = atomic_load(&h->sum);
       int64_t count = atomic_load(&h->count);
-      corTreeChildAdd(metricObj, corTreeFloat(kaP, "sum", sum / 1000.0));
+      corTreeChildAdd(metricObj, corTreeFloat(kaP, "sum", sum / 1e9));
       corTreeChildAdd(metricObj, corTreeInteger(kaP, "count", count));
     }
 
