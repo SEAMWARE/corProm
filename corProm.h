@@ -62,7 +62,8 @@ extern void corPromCounterInc(CorPromMetric* counter);
 //
 // corPromCounterAdd - add a value to a counter (atomic, lock-free)
 //
-// The value is added as fixed-point (multiplied by 1000 internally).
+// The value is added as fixed-point (multiplied by 1000 internally). A histogram keeps its sum in
+// billionths (corPromHistogramObserve).
 //
 extern void corPromCounterAdd(CorPromMetric* counter, int64_t value);
 
