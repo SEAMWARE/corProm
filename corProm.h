@@ -26,6 +26,8 @@ typedef struct CorPromMetric CorPromMetric;
 //
 // corPromCounterCreate - create a new counter metric
 //
+// NULL if the name is taken (or out of memory). Thread-safe.
+//
 extern CorPromMetric* corPromCounterCreate(const char* name, const char* help);
 
 
@@ -33,6 +35,8 @@ extern CorPromMetric* corPromCounterCreate(const char* name, const char* help);
 // -----------------------------------------------------------------------------
 //
 // corPromGaugeCreate - create a new gauge metric
+//
+// NULL if the name is taken (or out of memory). Thread-safe.
 //
 extern CorPromMetric* corPromGaugeCreate(const char* name, const char* help);
 
@@ -45,6 +49,7 @@ extern CorPromMetric* corPromGaugeCreate(const char* name, const char* help);
 // buckets: array of upper bounds (e.g., {0.01, 0.05, 0.1, 0.5, 1.0})
 // bucketCount: number of elements in buckets array
 // A +Inf bucket is added automatically.
+// NULL if the name is taken (or out of memory). Thread-safe.
 //
 extern CorPromMetric* corPromHistogramCreate(const char* name, const char* help, double* buckets, int bucketCount);
 
@@ -135,7 +140,7 @@ extern CorPromMetric* corPromLookup(const char* name);
 // corPromMetrics - render all metrics as a CorNode tree
 //
 // Returns an array of metric objects for a caller's /metrics endpoint.
-// Pass NULL to use malloc, or the CorAlloc to build the tree in.
+// Pass NULL for the tree heap (corTree/corTreeHeap.h), or the CorAlloc to build the tree in.
 //
 extern CorNode* corPromMetrics(CorAlloc* kaP);
 
