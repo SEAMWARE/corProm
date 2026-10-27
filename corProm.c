@@ -12,6 +12,7 @@
 #include <string.h>                              // strdup, strcmp
 #include <stdatomic.h>                           // atomic operations
 #include <math.h>                                // INFINITY, llround
+#include <pthread.h>                             // pthread_mutex_t
 
 #include "corAlloc/CorAlloc.h"                      // CorAlloc
 #include "corTree/CorNode.h"                        // CorNode
@@ -83,17 +84,67 @@ struct CorPromMetric
 //
 // Global list of metrics
 //
-static CorPromMetric* metricList = NULL;
+// Created under a mutex, so two threads creating metrics at once neither lose one nor both add a name.
+// A metric is linked once it is complete, with a release store - a render or lookup walking the list
+// without the lock (acquire loads) sees a metric whole or not at all.
+//
+static CorPromMetric*   metricList  = NULL;
+static pthread_mutex_t  metricMutex = PTHREAD_MUTEX_INITIALIZER;
 
 
 
 // -----------------------------------------------------------------------------
 //
-// metricCreate - create a new metric (internal helper)
+// first/after - the list, walked without the lock
 //
-static CorPromMetric* metricCreate(const char* name, const char* help, CorPromType type)
+static inline CorPromMetric* first(void)             { return __atomic_load_n(&metricList, __ATOMIC_ACQUIRE); }
+static inline CorPromMetric* after(CorPromMetric* m) { return __atomic_load_n(&m->next,    __ATOMIC_ACQUIRE); }
+
+
+
+// -----------------------------------------------------------------------------
+//
+// metricFind - the metric called 'name', NULL if none
+//
+static CorPromMetric* metricFind(const char* name)
 {
-  CorPromMetric* metric = (CorPromMetric*) malloc(sizeof(CorPromMetric));
+  for (CorPromMetric* m = first(); m != NULL; m = after(m))
+  {
+    if (strcmp(m->name, name) == 0)
+      return m;
+  }
+
+  return NULL;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// metricFree - a metric never linked
+//
+static void metricFree(CorPromMetric* metric)
+{
+  if (metric->type == CorPromTypeHistogram)
+  {
+    free(metric->value.histogram.bucketBounds);
+    free(metric->value.histogram.bucketCounts);
+  }
+
+  free(metric->name);
+  free(metric->help);
+  free(metric);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// metricNew - a new metric, not linked yet
+//
+static CorPromMetric* metricNew(const char* name, const char* help, CorPromType type)
+{
+  CorPromMetric* metric = (CorPromMetric*) calloc(1, sizeof(CorPromMetric));
 
   if (metric == NULL)
     return NULL;
@@ -103,20 +154,48 @@ static CorPromMetric* metricCreate(const char* name, const char* help, CorPromTy
   metric->type = type;
   metric->next = NULL;
 
+  if ((metric->name == NULL) || ((help != NULL) && (metric->help == NULL)))
+  {
+    metricFree(metric);
+    return NULL;
+  }
+
   // Initialize value to zero
   atomic_init(&metric->value.iValue, 0);
 
-  // Add to list
+  return metric;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// metricLink - add a complete metric to the list; NULL (and the metric freed) if its name is taken
+//
+// Prometheus refuses an exposition with a name twice - the second metric is refused here instead.
+//
+static CorPromMetric* metricLink(CorPromMetric* metric)
+{
+  pthread_mutex_lock(&metricMutex);
+
+  if (metricFind(metric->name) != NULL)
+  {
+    pthread_mutex_unlock(&metricMutex);
+    metricFree(metric);
+    return NULL;
+  }
+
   if (metricList == NULL)
-    metricList = metric;
+    __atomic_store_n(&metricList, metric, __ATOMIC_RELEASE);
   else
   {
     CorPromMetric* last = metricList;
     while (last->next != NULL)
       last = last->next;
-    last->next = metric;
+    __atomic_store_n(&last->next, metric, __ATOMIC_RELEASE);
   }
 
+  pthread_mutex_unlock(&metricMutex);
   return metric;
 }
 
@@ -128,7 +207,9 @@ static CorPromMetric* metricCreate(const char* name, const char* help, CorPromTy
 //
 CorPromMetric* corPromCounterCreate(const char* name, const char* help)
 {
-  return metricCreate(name, help, CorPromTypeCounter);
+  CorPromMetric* metric = metricNew(name, help, CorPromTypeCounter);
+
+  return (metric != NULL)? metricLink(metric) : NULL;
 }
 
 
@@ -139,7 +220,9 @@ CorPromMetric* corPromCounterCreate(const char* name, const char* help)
 //
 CorPromMetric* corPromGaugeCreate(const char* name, const char* help)
 {
-  return metricCreate(name, help, CorPromTypeGauge);
+  CorPromMetric* metric = metricNew(name, help, CorPromTypeGauge);
+
+  return (metric != NULL)? metricLink(metric) : NULL;
 }
 
 
@@ -150,7 +233,7 @@ CorPromMetric* corPromGaugeCreate(const char* name, const char* help)
 //
 CorPromMetric* corPromHistogramCreate(const char* name, const char* help, double* buckets, int bucketCount)
 {
-  CorPromMetric* metric = metricCreate(name, help, CorPromTypeHistogram);
+  CorPromMetric* metric = metricNew(name, help, CorPromTypeHistogram);
 
   if (metric == NULL)
     return NULL;
@@ -159,6 +242,12 @@ CorPromMetric* corPromHistogramCreate(const char* name, const char* help, double
   metric->value.histogram.bucketCount  = bucketCount + 1;
   metric->value.histogram.bucketBounds = (double*) malloc((bucketCount + 1) * sizeof(double));
   metric->value.histogram.bucketCounts = (atomic_int_fast64_t*) malloc((bucketCount + 1) * sizeof(atomic_int_fast64_t));
+
+  if ((metric->value.histogram.bucketBounds == NULL) || (metric->value.histogram.bucketCounts == NULL))
+  {
+    metricFree(metric);
+    return NULL;
+  }
 
   // Fill bucket bounds
   for (int i = 0; i < bucketCount; i++)
@@ -175,7 +264,7 @@ CorPromMetric* corPromHistogramCreate(const char* name, const char* help, double
   atomic_init(&metric->value.histogram.sum, 0);
   atomic_init(&metric->value.histogram.count, 0);
 
-  return metric;
+  return metricLink(metric);  // linked once its buckets are in place
 }
 
 
@@ -217,7 +306,7 @@ void corPromGaugeSet(CorPromMetric* gauge, double value)
   if (gauge == NULL || gauge->type != CorPromTypeGauge)
     return;
 
-  atomic_store(&gauge->value.iValue, (int64_t)(value * 1000.0));
+  atomic_store(&gauge->value.iValue, (int64_t) llround(value * 1000.0));
 }
 
 
@@ -231,7 +320,7 @@ void corPromGaugeAdd(CorPromMetric* gauge, double value)
   if (gauge == NULL || gauge->type != CorPromTypeGauge)
     return;
 
-  atomic_fetch_add(&gauge->value.iValue, (int64_t)(value * 1000.0));
+  atomic_fetch_add(&gauge->value.iValue, (int64_t) llround(value * 1000.0));
 }
 
 
@@ -245,7 +334,7 @@ void corPromGaugeSub(CorPromMetric* gauge, double value)
   if (gauge == NULL || gauge->type != CorPromTypeGauge)
     return;
 
-  atomic_fetch_sub(&gauge->value.iValue, (int64_t)(value * 1000.0));
+  atomic_fetch_sub(&gauge->value.iValue, (int64_t) llround(value * 1000.0));
 }
 
 
@@ -278,13 +367,44 @@ void corPromHistogramObserve(CorPromMetric* histogram, double value)
 
 // -----------------------------------------------------------------------------
 //
+// fixedText - a counter's or gauge's fixed-point value (thousandths) as text: "5", "2.5", "-0.125"
+//
+// A whole value is rendered without a fraction, as it always was; a gauge of 2.5 is "2.5", not "2".
+//
+static const char* fixedText(int64_t milli, char* buf, int bufLen)
+{
+  int64_t whole = milli / 1000;
+  int64_t frac  = milli % 1000;
+
+  if (frac == 0)
+  {
+    snprintf(buf, bufLen, "%ld", whole);
+    return buf;
+  }
+
+  if (frac < 0)
+    frac = -frac;
+
+  char fracText[8];
+  snprintf(fracText, sizeof(fracText), "%03ld", frac);
+  for (int i = 2; (i > 0) && (fracText[i] == '0'); i--)
+    fracText[i] = 0;
+
+  snprintf(buf, bufLen, "%s%ld.%s", ((milli < 0) && (whole == 0))? "-" : "", whole, fracText);
+  return buf;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // corPromRenderSize - calculate size needed for corPromRender
 //
 int corPromRenderSize(void)
 {
   int size = 0;
 
-  for (CorPromMetric* m = metricList; m != NULL; m = m->next)
+  for (CorPromMetric* m = first(); m != NULL; m = after(m))
   {
     // HELP line
     if (m->help != NULL)
@@ -298,13 +418,13 @@ int corPromRenderSize(void)
     // Value line(s)
     if (m->type == CorPromTypeCounter)
     {
-      int64_t iVal = atomic_load(&m->value.iValue) / 1000;
-      size += snprintf(NULL, 0, "%s %ld\n", m->name, iVal);
+      char vBuf[32];
+      size += snprintf(NULL, 0, "%s %s\n", m->name, fixedText(atomic_load(&m->value.iValue), vBuf, sizeof(vBuf)));
     }
     else if (m->type == CorPromTypeGauge)
     {
-      int64_t iVal = atomic_load(&m->value.iValue) / 1000;
-      size += snprintf(NULL, 0, "%s %ld\n", m->name, iVal);
+      char vBuf[32];
+      size += snprintf(NULL, 0, "%s %s\n", m->name, fixedText(atomic_load(&m->value.iValue), vBuf, sizeof(vBuf)));
     }
     else if (m->type == CorPromTypeHistogram)
     {
@@ -344,7 +464,7 @@ int corPromRender(char* buf, int bufLen)
   int written = 0;
   int remaining = bufLen;
 
-  for (CorPromMetric* m = metricList; m != NULL; m = m->next)
+  for (CorPromMetric* m = first(); m != NULL; m = after(m))
   {
     int n;
 
@@ -368,18 +488,18 @@ int corPromRender(char* buf, int bufLen)
     // Value line(s)
     if (m->type == CorPromTypeCounter)
     {
-      int64_t iVal = atomic_load(&m->value.iValue) / 1000;
+      char vBuf[32];
 
-      n = snprintf(buf + written, remaining, "%s %ld\n", m->name, iVal);
+      n = snprintf(buf + written, remaining, "%s %s\n", m->name, fixedText(atomic_load(&m->value.iValue), vBuf, sizeof(vBuf)));
       if (n >= remaining) return written + n;
       written += n;
       remaining -= n;
     }
     else if (m->type == CorPromTypeGauge)
     {
-      int64_t iVal = atomic_load(&m->value.iValue) / 1000;
+      char vBuf[32];
 
-      n = snprintf(buf + written, remaining, "%s %ld\n", m->name, iVal);
+      n = snprintf(buf + written, remaining, "%s %s\n", m->name, fixedText(atomic_load(&m->value.iValue), vBuf, sizeof(vBuf)));
       if (n >= remaining) return written + n;
       written += n;
       remaining -= n;
@@ -430,13 +550,7 @@ int corPromRender(char* buf, int bufLen)
 //
 CorPromMetric* corPromLookup(const char* name)
 {
-  for (CorPromMetric* m = metricList; m != NULL; m = m->next)
-  {
-    if (strcmp(m->name, name) == 0)
-      return m;
-  }
-
-  return NULL;
+  return metricFind(name);
 }
 
 
@@ -449,7 +563,7 @@ CorNode* corPromMetrics(CorAlloc* kaP)
 {
   CorNode* metricsArray = corTreeArray(kaP, NULL);
 
-  for (CorPromMetric* m = metricList; m != NULL; m = m->next)
+  for (CorPromMetric* m = first(); m != NULL; m = after(m))
   {
     CorNode* metricObj = corTreeObject(kaP, NULL);
 
